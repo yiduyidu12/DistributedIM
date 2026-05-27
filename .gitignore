@@ -1,0 +1,5 @@
+build/
+.trae/
+*.o
+*.a
+gateway_server
