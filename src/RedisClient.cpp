@@ -7,12 +7,11 @@
 #include <vector>
 
 namespace {
-
 // 执行Redis命令（带参数数组）
 // ctx: Redis上下文
 // args: 命令参数列表
 // 返回值: 返回Redis回复对象，调用者负责释放
-redisReply *execArgv(redisContext *ctx,
+  redisReply *execArgv(redisContext *ctx,
                      const std::vector<std::string> &args) {
   std::vector<const char *> argv;
   std::vector<size_t> argvlen;
@@ -108,7 +107,7 @@ bool RedisClient::userLogin(const std::string &username, int gateway_id,
   }
 
   // 开始事务
-  redisReply *r = redisCommand(ctx_, "MULTI");
+  redisReply *r = static_cast<redisReply*>(redisCommand(ctx_, "MULTI"));
   if (!checkReply(r, "MULTI"))
     return false;
   freeReplyObject(r);
@@ -137,7 +136,7 @@ bool RedisClient::userLogin(const std::string &username, int gateway_id,
   freeReplyObject(r);
 
   // 执行事务
-  r = redisCommand(ctx_, "EXEC");
+  r = static_cast<redisReply*>(redisCommand(ctx_, "EXEC"));
   if (!checkReply(r, "EXEC userLogin")) {
     return false;
   }
@@ -156,7 +155,7 @@ bool RedisClient::userLogout(const std::string &username) {
   }
 
   // 开始事务
-  redisReply *r = redisCommand(ctx_, "MULTI");
+  redisReply *r = static_cast<redisReply*>(redisCommand(ctx_, "MULTI"));
   if (!checkReply(r, "MULTI"))
     return false;
   freeReplyObject(r);
@@ -180,7 +179,7 @@ bool RedisClient::userLogout(const std::string &username) {
   freeReplyObject(r);
 
   // 执行事务
-  r = redisCommand(ctx_, "EXEC");
+  r = static_cast<redisReply*>(redisCommand(ctx_, "EXEC"));
   if (!checkReply(r, "EXEC userLogout")) {
     return false;
   }

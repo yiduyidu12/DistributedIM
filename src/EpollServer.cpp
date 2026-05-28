@@ -1,4 +1,3 @@
-// DistributedIM 分布式即时通讯网关服务器
 // 核心功能：TCP连接管理、用户登录/登出、消息路由、心跳检测、分布式在线用户管理
 
 #include "EpollServer.h"
