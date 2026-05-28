@@ -293,13 +293,15 @@ void EpollServer::loop() {
       }
     }
 
-    // 处理跨网关消息：从Redis队列中取出消息发送给本地用户
-    for (auto &[fd, conn] : connections_) {
-      if (!conn.username.empty()) {
-        auto msgs = redis_.popMessages(conn.username);
-        for (const auto &msg : msgs)
-          sendToClient(fd, msg);
-      }
+    // 处理跨网关消息：仅检查有待收消息的用户
+    auto pending = redis_.drainPendingUsers();
+    for (const auto &name : pending) {
+      int fd = getUserFd(name);
+      if (fd == -1)
+        continue;
+      auto msgs = redis_.popMessages(name);
+      for (const auto &msg : msgs)
+        sendToClient(fd, msg);
     }
 
     // 处理epoll事件
@@ -377,14 +379,6 @@ void EpollServer::disconnectClient(int client_fd) {
   // 清理用户映射
   if (!conn.username.empty())
     user_map_.erase(conn.username);
-
-  // 移除所有指向该fd的用户映射
-  for (auto um = user_map_.begin(); um != user_map_.end();) {
-    if (um->second == client_fd)
-      um = user_map_.erase(um);
-    else
-      ++um;
-  }
 
   // 移除连接对象
   connections_.erase(it);
@@ -567,7 +561,9 @@ void EpollServer::sendToClient(int fd, const std::string &msg) {
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLOUT;
         ev.data.fd = fd;
-        epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+        if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1)
+          std::cerr << "sendToClient: epoll_ctl MOD failed fd=" << fd
+                    << " err=" << strerror(errno) << std::endl;
       }
       return;
     } else {
@@ -592,7 +588,9 @@ void EpollServer::handleWrite(int fd) {
     epoll_event ev{};
     ev.events = EPOLLIN;
     ev.data.fd = fd;
-    epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+    if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1)
+      std::cerr << "handleWrite: epoll_ctl restore failed fd=" << fd
+                << " err=" << strerror(errno) << std::endl;
     return;
   }
 
@@ -617,7 +615,9 @@ void EpollServer::handleWrite(int fd) {
   epoll_event ev{};
   ev.events = EPOLLIN;
   ev.data.fd = fd;
-  epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+  if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1)
+    std::cerr << "handleWrite: epoll_ctl restore failed fd=" << fd
+              << " err=" << strerror(errno) << std::endl;
 }
 
 // 广播消息给所有客户端

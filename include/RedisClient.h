@@ -63,6 +63,10 @@ public:
   // 返回值: 消息列表
   std::vector<std::string> popMessages(const std::string &target);
 
+  // 获取并清空有待收消息的用户集合
+  // 返回值: 有待收消息的用户名列表
+  std::vector<std::string> drainPendingUsers();
+
 private:
   redisContext *ctx_;  // Redis连接上下文
 };

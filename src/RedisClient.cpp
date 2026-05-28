@@ -261,15 +261,34 @@ std::unordered_map<std::string, int> RedisClient::getAllOnlineUsers() {
   if (!checkReply(r, "SMEMBERS online_users"))
     return users;
 
-  if (r->type == REDIS_REPLY_ARRAY) {
-    for (size_t i = 0; i < r->elements; ++i) {
-      if (r->element[i]->type == REDIS_REPLY_STRING && r->element[i]->str) {
-        std::string name = r->element[i]->str;
-        users[name] = getUserGateway(name);
-      }
+  if (r->type != REDIS_REPLY_ARRAY || r->elements == 0) {
+    freeReplyObject(r);
+    return users;
+  }
+
+  for (size_t i = 0; i < r->elements; ++i) {
+    if (r->element[i]->type == REDIS_REPLY_STRING && r->element[i]->str) {
+      std::string key = userKey(r->element[i]->str);
+      redisAppendCommand(ctx_, "HGET %s gateway", key.c_str());
+      users[r->element[i]->str] = -1;
     }
   }
   freeReplyObject(r);
+
+  for (auto &[name, gw] : users) {
+    redisReply *hr = nullptr;
+    redisGetReply(ctx_, reinterpret_cast<void **>(&hr));
+    if (hr && hr->type == REDIS_REPLY_STRING) {
+      try {
+        gw = std::stoi(hr->str);
+      } catch (const std::invalid_argument &) {
+      } catch (const std::out_of_range &) {
+      }
+    }
+    if (hr)
+      freeReplyObject(hr);
+  }
+
   return users;
 }
 
@@ -288,6 +307,11 @@ bool RedisClient::pushMessage(const std::string &target,
   if (!checkReply(r, "RPUSH msg_queue"))
     return false;
   freeReplyObject(r);
+
+  r = execArgv(ctx_, {"SADD", "pending_msgs", target});
+  if (r)
+    freeReplyObject(r);
+
   return true;
 }
 
@@ -311,4 +335,30 @@ std::vector<std::string> RedisClient::popMessages(const std::string &target) {
     freeReplyObject(r);
   }
   return msgs;
+}
+
+std::vector<std::string> RedisClient::drainPendingUsers() {
+  std::vector<std::string> users;
+  if (!ctx_)
+    return users;
+
+  redisReply *r = execArgv(ctx_, {"SMEMBERS", "pending_msgs"});
+  if (!r)
+    return users;
+
+  if (r->type == REDIS_REPLY_ARRAY) {
+    for (size_t i = 0; i < r->elements; ++i) {
+      if (r->element[i]->type == REDIS_REPLY_STRING && r->element[i]->str)
+        users.emplace_back(r->element[i]->str);
+    }
+  }
+  freeReplyObject(r);
+
+  if (!users.empty()) {
+    r = execArgv(ctx_, {"DEL", "pending_msgs"});
+    if (r)
+      freeReplyObject(r);
+  }
+
+  return users;
 }
