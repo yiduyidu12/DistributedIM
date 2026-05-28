@@ -55,6 +55,8 @@ EpollServer::~EpollServer() {
   }
   connections_.clear();
 
+  redis_.disconnect();
+
   if (server_fd_ != -1)
     close(server_fd_);
   if (epfd_ != -1)
@@ -303,10 +305,14 @@ void EpollServer::loop() {
     // 处理epoll事件
     for (int i = 0; i < nfds; i++) {
       int fd = events[i].data.fd;
-      if (fd == server_fd_)
-        handleAccept();  // 新连接
-      else
-        handleRead(fd);  // 可读事件
+      if (fd == server_fd_) {
+        handleAccept();
+      } else {
+        if (events[i].events & EPOLLIN)
+          handleRead(fd);
+        if (events[i].events & EPOLLOUT)
+          handleWrite(fd);
+      }
     }
   }
 }
@@ -351,9 +357,18 @@ void EpollServer::disconnectClient(int client_fd) {
     return;
 
   Connection &conn = it->second;
+
+  // 如果有未发送完的数据，丢弃
+  conn.write_buffer.clear();
+  conn.write_pending = false;
+
   // 如果用户已登录，从Redis注销
-  if (!conn.username.empty())
-    redis_.userLogout(conn.username);
+  if (!conn.username.empty()) {
+    if (!redis_.userLogout(conn.username)) {
+      std::cerr << "[WARN] Failed to logout " << conn.username
+                << " from Redis on disconnect" << std::endl;
+    }
+  }
 
   // 从epoll中移除并关闭socket
   epoll_ctl(epfd_, EPOLL_CTL_DEL, client_fd, nullptr);
@@ -386,6 +401,20 @@ bool EpollServer::performLogin(int client_fd, Connection &conn,
     nlohmann::json reply{{"type", "login"}, {"status", "fail"}};
     sendToClient(client_fd, reply.dump() + "\n");
     return false;
+  }
+
+  // 处理同一用户重复登录：清除旧连接的用户信息，防止旧连接断开时误删新连接数据
+  auto old_it = user_map_.find(name);
+  if (old_it != user_map_.end() && old_it->second != client_fd) {
+    int old_fd = old_it->second;
+    auto old_conn = connections_.find(old_fd);
+    if (old_conn != connections_.end()) {
+      old_conn->second.username.clear();
+      old_conn->second.isLogin = false;
+      std::cout << "[INFO] Duplicate login: " << name << " from fd=" << old_fd
+                << " replaced by fd=" << client_fd << std::endl;
+    }
+    user_map_.erase(old_it);
   }
 
   // 调用RedisClient进行登录（原子操作）
@@ -516,28 +545,82 @@ void EpollServer::handleRead(int client_fd) {
 // fd: 客户端文件描述符
 // msg: 要发送的消息内容
 void EpollServer::sendToClient(int fd, const std::string &msg) {
+  auto it = connections_.find(fd);
+  if (it == connections_.end())
+    return;
+
+  Connection &conn = it->second;
+  if (!conn.write_buffer.empty()) {
+    conn.write_buffer += msg;
+    return;
+  }
+
   size_t total = 0;
   while (total < msg.size()) {
     ssize_t n = write(fd, msg.data() + total, msg.size() - total);
     if (n > 0) {
       total += static_cast<size_t>(n);
     } else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      break;  // 非阻塞模式下暂时无法写入，稍后重试
+      conn.write_buffer = msg.substr(total);
+      if (!conn.write_pending) {
+        conn.write_pending = true;
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLOUT;
+        ev.data.fd = fd;
+        epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+      }
+      return;
     } else {
       std::cerr << "Error writing to client " << fd << ": " << strerror(errno)
                 << std::endl;
       return;
     }
   }
-  // 记录部分写入的情况
-  if (total < msg.size()) {
-    std::cerr << "Partial write to client " << fd << ". Wrote " << total
-              << " of " << msg.size() << " bytes." << std::endl;
+}
+
+// 处理客户端可写事件
+// 当客户端socket变为可写时，刷新写缓冲区中的剩余数据
+// fd: 客户端文件描述符
+void EpollServer::handleWrite(int fd) {
+  auto it = connections_.find(fd);
+  if (it == connections_.end())
+    return;
+
+  Connection &conn = it->second;
+  if (conn.write_buffer.empty()) {
+    conn.write_pending = false;
+    epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+    return;
   }
+
+  size_t total = 0;
+  const std::string &data = conn.write_buffer;
+  while (total < data.size()) {
+    ssize_t n = write(fd, data.data() + total, data.size() - total);
+    if (n > 0) {
+      total += static_cast<size_t>(n);
+    } else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      conn.write_buffer.erase(0, total);
+      return;
+    } else {
+      std::cerr << "Error writing to client " << fd << ": " << strerror(errno)
+                << std::endl;
+      conn.write_buffer.clear();
+      return;
+    }
+  }
+  conn.write_buffer.clear();
+  conn.write_pending = false;
+  epoll_event ev{};
+  ev.events = EPOLLIN;
+  ev.data.fd = fd;
+  epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
 }
 
 // 广播消息给所有客户端
-// msg: 要广播的消息内容
 // exclude_fd: 排除的文件描述符（-1表示不排除）
 void EpollServer::broadcast(const std::string &msg, int exclude_fd) {
   for (auto &[fd, conn] : connections_) {

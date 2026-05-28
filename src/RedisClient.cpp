@@ -75,10 +75,13 @@ RedisClient::~RedisClient() { disconnect(); }
 bool RedisClient::connect(const std::string &host, int port) {
   ctx_ = redisConnect(host.c_str(), port);
   if (!ctx_ || ctx_->err) {
-    if (ctx_)
+    if (ctx_) {
       std::cerr << "Redis error: " << ctx_->errstr << std::endl;
-    else
+      redisFree(ctx_);
+      ctx_ = nullptr;
+    } else {
       std::cerr << "Redis connection failed" << std::endl;
+    }
     return false;
   }
   std::cout << "[Redis] Connected to Redis server" << std::endl;

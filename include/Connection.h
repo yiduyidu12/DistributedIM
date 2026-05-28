@@ -16,7 +16,9 @@ public:
   int fd_;              // 客户端文件描述符
   std::string username; // 用户名（登录后设置）
   bool isLogin;         // 是否已登录
-  std::string read_buffer;  // 读取缓冲区
+  std::string read_buffer;   // 读取缓冲区
+  std::string write_buffer;  // 写缓冲区（非阻塞模式下未发完的数据）
+  bool write_pending = false; // 是否已注册EPOLLOUT等待发送
   time_t last_active;   // 最后活动时间（用于超时检测）
 };
 

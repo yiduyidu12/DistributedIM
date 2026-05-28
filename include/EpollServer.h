@@ -36,6 +36,9 @@ private:
   // 处理客户端可读事件
   void handleRead(int client_fd);
 
+  // 处理客户端可写事件（刷新写缓冲区）
+  void handleWrite(int client_fd);
+
   // 处理客户端消息
   void handleMessage(int client_fd, Connection &conn, const std::string &msg);
 
