@@ -1,0 +1,8 @@
+build/
+.trae/
+*.o
+*.a
+gateway_server
+.clangd_install/
+compile_commands.json
+.cache/

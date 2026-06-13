@@ -1,0 +1,17 @@
+{
+    "server": {
+        "port": 8888,
+        "max_connections": 1024,
+        "timeout_seconds": 300
+    },
+    "redis": {
+        "host": "127.0.0.1",
+        "port": 6379,
+        "password": "",
+        "db": 0
+    },
+    "log": {
+        "level": "trace",
+        "file": "gateway.log"
+    }
+}
