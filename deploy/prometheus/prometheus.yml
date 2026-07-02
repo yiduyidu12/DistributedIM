@@ -1,0 +1,54 @@
+# Prometheus 监控配置
+# 采集 C++ 网关、Go API、Python AI 服务的指标
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # C++ 网关指标
+  - job_name: 'gateway'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['gateway:8888']
+        labels:
+          service: 'gateway'
+          env: 'production'
+
+  # Go HTTP API 指标
+  - job_name: 'http-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['http-api:8080']
+        labels:
+          service: 'http-api'
+
+  # Python AI 服务指标
+  - job_name: 'ai-service'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ai-service:8000']
+        labels:
+          service: 'ai-service'
+
+  # Redis 指标（通过 redis_exporter 暴露）
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:9121']
+
+  # PostgreSQL 指标（通过 postgres_exporter 暴露）
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:9187']
+
+  # Prometheus 自身监控
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

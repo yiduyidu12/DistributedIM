@@ -106,11 +106,11 @@ bool RedisClient::isConnected() const {
 }
 
 // 用户登录（原子操作）
-// 使用Lua脚本确保原子性，避免多网关并发登录竞态
+// 使用Lua脚本确保原子性，支持多设备登录
 // 参数 username: 用户名
 // 参数 gateway_id: 网关ID
 // 参数 fd: 客户端文件描述符
-// 返回值: 1=成功, 0=用户已在线(拒绝), -1=错误
+// 返回值: 1=成功, 0=失败(其他错误), -1=连接错误
 int RedisClient::userLogin(const std::string &username, int gateway_id,
                             int fd) {
   // 参数校验
@@ -127,16 +127,16 @@ int RedisClient::userLogin(const std::string &username, int gateway_id,
     return -1;
   }
 
-  // Lua脚本：原子化检查用户是否已在线，避免多网关并发登录竞态
-  // 如果online_users集合中已存在该用户 → 返回0（拒绝登录）
-  // 如果不存在 → 执行HSET存储用户信息 + SADD加入在线集合 → 返回1（允许登录）
+  // Lua脚本：原子化执行多设备登录操作
+  // 用户设备信息存储格式：user:username (Set) → {"gw_1:fd_1", "gw_2:fd_2", ...}
+  // online_users集合标记用户是否至少有一个在线设备
+  // 每次登录：SADD加入新设备 → 如果是首次登录则SADD到online_users → 返回1
   const char *lua_script =
-      "local member = ARGV[1] "
-      "if redis.call('SISMEMBER', 'online_users', member) == 1 then "
-      "  return 0 "
-      "end "
-      "redis.call('HSET', KEYS[1], 'gateway', ARGV[2], 'fd', ARGV[3]) "
-      "redis.call('SADD', 'online_users', member) "
+      "local username = ARGV[1] "
+      "local device_key = ARGV[2] .. ':' .. ARGV[3] "
+      "local user_key = KEYS[1] "
+      "redis.call('SADD', user_key, device_key) "
+      "redis.call('SADD', 'online_users', username) "
       "return 1";
 
   // 确保C字符串在EVAL调用期间存活（不能直接使用临时std::string的c_str()）
@@ -161,18 +161,18 @@ int RedisClient::userLogin(const std::string &username, int gateway_id,
   int result = (r->type == REDIS_REPLY_INTEGER && r->integer == 1) ? 1 : 0;
   freeReplyObject(r);
 
-  if (result == 0) {
-    Logger::warn("RedisClient: userLogin rejected - user '{}' is already online",
-                 username);
-  }
+  Logger::info("RedisClient: userLogin succeeded - user '{}', gateway={}, fd={}",
+               username, gateway_id, fd);
   return result;
 }
 
 // 用户登出（原子操作）
-// 使用MULTI/EXEC事务确保原子性
+// 使用Lua脚本确保原子性，支持多设备登出
 // 参数 username: 用户名
+// 参数 gateway_id: 网关ID
+// 参数 fd: 客户端文件描述符
 // 返回值: 成功返回true，失败返回false
-bool RedisClient::userLogout(const std::string &username) {
+bool RedisClient::userLogout(const std::string &username, int gateway_id, int fd) {
   // 参数校验
   if (!isConnected()) {
     Logger::error("RedisClient: Not connected for userLogout");
@@ -182,43 +182,51 @@ bool RedisClient::userLogout(const std::string &username) {
     Logger::error("RedisClient: userLogout called with empty username");
     return false;
   }
-
-  // 开始事务
-  redisReply *r = static_cast<redisReply*>(redisCommand(ctx_, "MULTI"));
-  if (!checkReply(r, "MULTI"))
-    return false;
-  freeReplyObject(r);
-
-  // 队列DEL命令：删除用户信息哈希表
-  r = execArgv(ctx_, {"DEL", userKey(username)});
-  if (!r) {
-    Logger::error("RedisClient: Failed to queue DEL command");
-    redisReply *discard_reply = static_cast<redisReply*>(redisCommand(ctx_, "DISCARD"));
-    if (discard_reply) freeReplyObject(discard_reply);
+  if (fd < 0) {
+    Logger::error("RedisClient: userLogout called with invalid fd={}", fd);
     return false;
   }
-  freeReplyObject(r);
 
-  // 队列SREM命令：从在线用户集合中移除
-  r = execArgv(ctx_, {"SREM", "online_users", username});
-  if (!r) {
-    Logger::error("RedisClient: Failed to queue SREM command");
-    redisReply *discard_reply = static_cast<redisReply*>(redisCommand(ctx_, "DISCARD"));
-    if (discard_reply) freeReplyObject(discard_reply);
+  // Lua脚本：原子化执行多设备登出操作
+  // 1. 从用户设备集合中移除指定设备（gw_id:fd）
+  // 2. 检查用户是否还有其他设备在线
+  // 3. 如果没有其他设备，从online_users集合中移除用户
+  const char *lua_script =
+      "local username = ARGV[1] "
+      "local device_key = ARGV[2] .. ':' .. ARGV[3] "
+      "local user_key = KEYS[1] "
+      "redis.call('SREM', user_key, device_key) "
+      "if redis.call('SCARD', user_key) == 0 then "
+      "  redis.call('SREM', 'online_users', username) "
+      "end "
+      "return 1";
+
+  // 确保C字符串在EVAL调用期间存活
+  std::string gw_str = std::to_string(gateway_id);
+  std::string fd_str = std::to_string(fd);
+  const char *argv_stable[] = {
+      username.c_str(),
+      gw_str.c_str(),
+      fd_str.c_str(),
+  };
+
+  std::string key = userKey(username);
+  redisReply *r = static_cast<redisReply *>(
+      redisCommand(ctx_, "EVAL %s 1 %s %s %s %s",
+                   lua_script, key.c_str(),
+                   argv_stable[0], argv_stable[1], argv_stable[2]));
+
+  if (!checkReply(r, "EVAL userLogout")) {
     return false;
   }
-  freeReplyObject(r);
 
-  // 执行事务
-  r = static_cast<redisReply*>(redisCommand(ctx_, "EXEC"));
-  if (!checkReply(r, "EXEC userLogout")) {
-    return false;
-  }
   freeReplyObject(r);
+  Logger::info("RedisClient: userLogout succeeded - user '{}', gateway={}, fd={}",
+               username, gateway_id, fd);
   return true;
 }
 
-// 获取用户所在网关
+// 获取用户所在网关（支持多设备，返回第一个设备的网关）
 // 参数 username: 用户名
 // 返回值: 网关ID，失败返回-1
 int RedisClient::getUserGateway(const std::string &username) {
@@ -229,21 +237,27 @@ int RedisClient::getUserGateway(const std::string &username) {
     return -1;
   }
 
+  // 获取用户的第一个设备（格式: gateway_id:fd）
   redisReply *r =
-      execArgv(ctx_, {"HGET", userKey(username), "gateway"});
+      execArgv(ctx_, {"SRANDMEMBER", userKey(username)});
   int g = -1;
   if (r && r->type == REDIS_REPLY_STRING) {
-    try {
-      g = std::stoi(r->str);
-    } catch (const std::invalid_argument &) {
-      Logger::warn("RedisClient: Invalid gateway format for user {}: {}", 
-                   username, r->str);
-    } catch (const std::out_of_range &) {
-      Logger::warn("RedisClient: Gateway value out of range for user {}: {}", 
-                   username, r->str);
+    std::string device_info(r->str);
+    size_t colon_pos = device_info.find(':');
+    if (colon_pos != std::string::npos) {
+      std::string gateway_str = device_info.substr(0, colon_pos);
+      try {
+        g = std::stoi(gateway_str);
+      } catch (const std::invalid_argument &) {
+        Logger::warn("RedisClient: Invalid gateway format for user {}: {}", 
+                     username, gateway_str);
+      } catch (const std::out_of_range &) {
+        Logger::warn("RedisClient: Gateway value out of range for user {}: {}", 
+                     username, gateway_str);
+      }
     }
   } else if (r && r->type == REDIS_REPLY_ERROR) {
-    Logger::error("RedisClient: HGET gateway error for user {}: {}", 
+    Logger::error("RedisClient: SRANDMEMBER error for user {}: {}", 
                   username, r->str);
   }
   if (r)
@@ -251,7 +265,7 @@ int RedisClient::getUserGateway(const std::string &username) {
   return g;
 }
 
-// 获取用户的客户端fd
+// 获取用户的客户端fd（支持多设备，返回第一个设备的fd）
 // 参数 username: 用户名
 // 返回值: 文件描述符，失败返回-1
 int RedisClient::getUserFd(const std::string &username) {
@@ -262,20 +276,26 @@ int RedisClient::getUserFd(const std::string &username) {
     return -1;
   }
 
-  redisReply *r = execArgv(ctx_, {"HGET", userKey(username), "fd"});
+  // 获取用户的第一个设备（格式: gateway_id:fd）
+  redisReply *r = execArgv(ctx_, {"SRANDMEMBER", userKey(username)});
   int fd = -1;
   if (r && r->type == REDIS_REPLY_STRING) {
-    try {
-      fd = std::stoi(r->str);
-    } catch (const std::invalid_argument &) {
-      Logger::warn("RedisClient: Invalid fd format for user {}: {}", 
-                   username, r->str);
-    } catch (const std::out_of_range &) {
-      Logger::warn("RedisClient: FD value out of range for user {}: {}", 
-                   username, r->str);
+    std::string device_info(r->str);
+    size_t colon_pos = device_info.find(':');
+    if (colon_pos != std::string::npos) {
+      std::string fd_str = device_info.substr(colon_pos + 1);
+      try {
+        fd = std::stoi(fd_str);
+      } catch (const std::invalid_argument &) {
+        Logger::warn("RedisClient: Invalid fd format for user {}: {}", 
+                     username, fd_str);
+      } catch (const std::out_of_range &) {
+        Logger::warn("RedisClient: FD value out of range for user {}: {}", 
+                     username, fd_str);
+      }
     }
   } else if (r && r->type == REDIS_REPLY_ERROR) {
-    Logger::error("RedisClient: HGET fd error for user {}: {}", 
+    Logger::error("RedisClient: SRANDMEMBER error for user {}: {}", 
                   username, r->str);
   }
   if (r)
@@ -455,4 +475,175 @@ std::vector<std::string> RedisClient::drainPendingUsers() {
 
   freeReplyObject(r);
   return users;
+}// RedisClient - Redis客户端封装类新增方法
+// 包含群组管理所需的 Hash/Set 操作方法
+
+#include "RedisClient.h"
+#include "Logger.h"
+#include <vector>
+
+// ============ Hash 操作（群组元数据） ============
+
+// 设置 Hash 字段
+// 参数 key: Redis key
+// 参数 field: 字段名
+// 参数 value: 字段值
+// 返回值: 成功返回true
+bool RedisClient::setHashField(const std::string& key, const std::string& field,
+                                const std::string& value) {
+    if (!isConnected()) {
+        Logger::error("RedisClient: Not connected for setHashField");
+        return false;
+    }
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "HSET %s %s %s", key.c_str(), field.c_str(), value.c_str()));
+    if (!r || r->type == REDIS_REPLY_ERROR) {
+        Logger::error("RedisClient: HSET failed for key={}, field={}", key, field);
+        if (r) freeReplyObject(r);
+        return false;
+    }
+    freeReplyObject(r);
+    return true;
+}
+
+// 获取 Hash 字段
+// 参数 key: Redis key
+// 参数 field: 字段名
+// 返回值: 字段值，失败返回空字符串
+std::string RedisClient::getHashField(const std::string& key, const std::string& field) {
+    if (!isConnected()) return "";
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "HGET %s %s", key.c_str(), field.c_str()));
+    std::string result;
+    if (r && r->type == REDIS_REPLY_STRING) {
+        result = std::string(r->str, r->len);
+    } else if (r && r->type == REDIS_REPLY_ERROR) {
+        Logger::error("RedisClient: HGET failed for key={}, field={}: {}", key, field, r->str);
+    }
+    if (r) freeReplyObject(r);
+    return result;
+}
+
+// ============ Set 操作（群组成员） ============
+
+// 向集合中添加元素
+// 参数 key: Redis key
+// 参数 member: 要添加的元素
+// 返回值: 成功返回true
+bool RedisClient::setAdd(const std::string& key, const std::string& member) {
+    if (!isConnected()) return false;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "SADD %s %s", key.c_str(), member.c_str()));
+    bool ok = r && r->type == REDIS_REPLY_INTEGER;
+    if (!ok && r) {
+        Logger::error("RedisClient: SADD failed for key={}, member={}", key, member);
+    }
+    if (r) freeReplyObject(r);
+    return ok;
+}
+
+// 从集合中移除元素
+// 参数 key: Redis key
+// 参数 member: 要移除的元素
+// 返回值: 成功返回true
+bool RedisClient::setRemove(const std::string& key, const std::string& member) {
+    if (!isConnected()) return false;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "SREM %s %s", key.c_str(), member.c_str()));
+    bool ok = r && r->type == REDIS_REPLY_INTEGER;
+    if (r) freeReplyObject(r);
+    return ok;
+}
+
+// 检查元素是否在集合中
+// 参数 key: Redis key
+// 参数 member: 要检查的元素
+// 返回值: 在集合中返回true
+bool RedisClient::setIsMember(const std::string& key, const std::string& member) {
+    if (!isConnected()) return false;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "SISMEMBER %s %s", key.c_str(), member.c_str()));
+    bool ok = r && r->type == REDIS_REPLY_INTEGER && r->integer == 1;
+    if (r) freeReplyObject(r);
+    return ok;
+}
+
+// 获取集合所有成员
+// 参数 key: Redis key
+// 返回值: 成员列表，失败返回空列表
+std::vector<std::string> RedisClient::setMembers(const std::string& key) {
+    std::vector<std::string> members;
+    if (!isConnected()) return members;
+
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "SMEMBERS %s", key.c_str()));
+    if (r && r->type == REDIS_REPLY_ARRAY) {
+        for (size_t i = 0; i < r->elements; ++i) {
+            if (r->element[i]->type == REDIS_REPLY_STRING) {
+                members.emplace_back(r->element[i]->str, r->element[i]->len);
+            }
+        }
+    } else if (r && r->type == REDIS_REPLY_ERROR) {
+        Logger::error("RedisClient: SMEMBERS failed for key={}: {}", key, r->str);
+    }
+    if (r) freeReplyObject(r);
+    return members;
+}
+
+// 获取集合大小
+// 参数 key: Redis key
+// 返回值: 集合元素数量
+int RedisClient::setSize(const std::string& key) {
+    if (!isConnected()) return 0;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "SCARD %s", key.c_str()));
+    int count = 0;
+    if (r && r->type == REDIS_REPLY_INTEGER) {
+        count = static_cast<int>(r->integer);
+    }
+    if (r) freeReplyObject(r);
+    return count;
+}
+
+// ============ 通用操作 ============
+
+// 删除 key
+// 参数 key: Redis key
+// 返回值: 成功返回true
+bool RedisClient::deleteKey(const std::string& key) {
+    if (!isConnected()) return false;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "DEL %s", key.c_str()));
+    bool ok = r && r->type == REDIS_REPLY_INTEGER && r->integer > 0;
+    if (r) freeReplyObject(r);
+    return ok;
+}
+
+// 检查 key 是否存在
+// 参数 key: Redis key
+// 返回值: 存在返回true
+bool RedisClient::keyExists(const std::string& key) {
+    if (!isConnected()) return false;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "EXISTS %s", key.c_str()));
+    bool ok = r && r->type == REDIS_REPLY_INTEGER && r->integer == 1;
+    if (r) freeReplyObject(r);
+    return ok;
+}
+
+// 原子递增计数器（用于生成唯一ID）
+// 参数 key: Redis key
+// 返回值: 递增后的值，失败返回-1
+long long RedisClient::incr(const std::string& key) {
+    if (!isConnected()) return -1;
+    redisReply* r = static_cast<redisReply*>(
+        redisCommand(ctx_, "INCR %s", key.c_str()));
+    long long val = -1;
+    if (r && r->type == REDIS_REPLY_INTEGER) {
+        val = r->integer;
+    } else if (r && r->type == REDIS_REPLY_ERROR) {
+        Logger::error("RedisClient: INCR failed for key={}: {}", key, r->str);
+    }
+    if (r) freeReplyObject(r);
+    return val;
 }

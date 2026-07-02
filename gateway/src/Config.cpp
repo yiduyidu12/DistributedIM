@@ -240,6 +240,7 @@ bool Config::loadJson(const std::string& config_file) {
             }
         }
         
+        parseNewJsonConfig(config);
         std::cout << "[INFO] Config loaded successfully from: " << config_file << std::endl;
         return true;
     } catch (const nlohmann::json::parse_error& e) {
@@ -501,4 +502,83 @@ const Config::LogConfig& Config::log() {
 // 返回值: 调试配置常量引用
 const Config::DebugConfig& Config::debug() {
     return debug_config_;
+}// Config - 新增配置段实现
+// 在现有 Config.cpp 基础上追加 E2EE/AI/Region/RateLimit/WebSocket 配置支持
+
+#include "Config.h"
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <iostream>
+#include <algorithm>
+#include <cctype>
+
+// 新增静态成员初始化
+Config::E2EEConfig Config::e2ee_config_;
+Config::AIConfig Config::ai_config_;
+Config::RegionConfig Config::region_config_;
+Config::RateLimitConfig Config::ratelimit_config_;
+Config::WebSocketConfig Config::ws_config_;
+
+// 新增配置访问器实现
+const Config::E2EEConfig& Config::e2ee() { return e2ee_config_; }
+const Config::AIConfig& Config::ai() { return ai_config_; }
+const Config::RegionConfig& Config::region() { return region_config_; }
+const Config::RateLimitConfig& Config::rateLimit() { return ratelimit_config_; }
+const Config::WebSocketConfig& Config::websocket() { return ws_config_; }
+
+// 解析新增的 JSON 配置段（在 loadJson 中追加调用）
+// 参数 config: 已解析的 JSON 对象
+void Config::parseNewJsonConfig(const nlohmann::json& config) {
+    // 解析 E2EE 配置
+    if (config.contains("e2ee") && config["e2ee"].is_object()) {
+        auto& e2ee = config["e2ee"];
+        if (e2ee.contains("enabled")) Config::e2ee_config_.enabled = e2ee["enabled"];
+        if (e2ee.contains("key_dir") && e2ee["key_dir"].is_string())
+            Config::e2ee_config_.key_dir = e2ee["key_dir"];
+        std::cout << "[INFO] E2EE config loaded: enabled="
+                  << (Config::e2ee_config_.enabled ? "true" : "false") << std::endl;
+    }
+
+    // 解析 AI 服务配置
+    if (config.contains("ai") && config["ai"].is_object()) {
+        auto& ai = config["ai"];
+        if (ai.contains("enabled")) Config::ai_config_.enabled = ai["enabled"];
+        if (ai.contains("api_url") && ai["api_url"].is_string())
+            Config::ai_config_.api_url = ai["api_url"];
+        if (ai.contains("timeout_ms") && ai["timeout_ms"].is_number_integer())
+            Config::ai_config_.timeout_ms = ai["timeout_ms"];
+        if (ai.contains("max_context_messages") && ai["max_context_messages"].is_number_integer())
+            Config::ai_config_.max_context_messages = ai["max_context_messages"];
+        if (ai.contains("audit_api_url") && ai["audit_api_url"].is_string())
+            Config::ai_config_.audit_api_url = ai["audit_api_url"];
+    }
+
+    // 解析区域配置
+    if (config.contains("region") && config["region"].is_object()) {
+        auto& region = config["region"];
+        if (region.contains("name") && region["name"].is_string())
+            Config::region_config_.region = region["name"];
+        if (region.contains("prefer_local"))
+            Config::region_config_.prefer_local = region["prefer_local"];
+    }
+
+    // 解析限流配置
+    if (config.contains("rate_limit") && config["rate_limit"].is_object()) {
+        auto& rl = config["rate_limit"];
+        if (rl.contains("enabled")) Config::ratelimit_config_.enabled = rl["enabled"];
+        if (rl.contains("messages_per_second") && rl["messages_per_second"].is_number())
+            Config::ratelimit_config_.messages_per_second = rl["messages_per_second"];
+        if (rl.contains("bucket_capacity") && rl["bucket_capacity"].is_number_integer())
+            Config::ratelimit_config_.bucket_capacity = rl["bucket_capacity"];
+    }
+
+    // 解析 WebSocket 配置
+    if (config.contains("websocket") && config["websocket"].is_object()) {
+        auto& ws = config["websocket"];
+        if (ws.contains("enabled")) Config::ws_config_.enabled = ws["enabled"];
+        if (ws.contains("max_frame_size") && ws["max_frame_size"].is_number())
+            Config::ws_config_.max_frame_size = ws["max_frame_size"];
+        if (ws.contains("max_message_size") && ws["max_message_size"].is_number_integer())
+            Config::ws_config_.max_message_size = ws["max_message_size"];
+    }
 }

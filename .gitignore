@@ -1,8 +1,56 @@
-build/
-.trae/
+# Compiled Object files
 *.o
+*.obj
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
 *.a
-gateway_server
-.clangd_install/
-compile_commands.json
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# CMake generated files
+build/
+_build/
+*.cmake
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.ninja
+.ninja_deps
+.ninja_log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Trae IDE files
+.trae/
 .cache/
+
+# Log files
+*.log
+
+# Config files (local overrides)
+config.local.ini
+config.local.json
+
+# Redis dump files
+dump.rdb
+
+# Temporary files
+*.tmp
+*.temp
+
+# Dependency sources
+gateway/build/_deps/

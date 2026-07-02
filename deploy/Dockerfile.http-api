@@ -1,0 +1,16 @@
+# DistributedIM - Go HTTP API 服务多阶段 Dockerfile
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /build
+COPY services/http-api/go.mod services/http-api/go.sum ./
+RUN go mod download 2>/dev/null || true
+COPY services/http-api/ ./
+RUN CGO_ENABLED=0 go build -o /http-api ./cmd/main.go
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=builder /http-api /app/http-api
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://localhost:8080/health || exit 1
+ENTRYPOINT ["/app/http-api"]

@@ -1,0 +1,200 @@
+# DistributedIM - Docker Compose 全栈部署
+# 8 个服务：nginx, gateway, http-api, ai-service, file-service, redis, postgres, minio
+# 一键启动：docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============ Nginx 反向代理 + TLS 终止 ============
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: im-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - gateway
+      - http-api
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ C++ 网关服务 ============
+  gateway:
+    build:
+      context: ../gateway
+      dockerfile: ../deploy/Dockerfile.gateway
+    container_name: im-gateway
+    ports:
+      - "8888:8888"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CONFIG_FILE=/app/config.json
+    volumes:
+      - ../gateway/config.json:/app/config.json:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ Go HTTP API 服务 ============
+  http-api:
+    build:
+      context: ../services/http-api
+      dockerfile: ../../deploy/Dockerfile.http-api
+    container_name: im-http-api
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=distim
+      - DB_PASSWORD=distim_secret
+      - DB_NAME=distributed_im
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=change-me-in-production
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ Python AI 服务 ============
+  ai-service:
+    build:
+      context: ../services/ai-service
+      dockerfile: ../../deploy/Dockerfile.ai-service
+    container_name: im-ai-service
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - QWEN_API_KEY=${QWEN_API_KEY:-}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ 文件服务 (Go) ============
+  file-service:
+    build:
+      context: ../services/file-service
+      dockerfile: ../../deploy/Dockerfile.file-service
+    container_name: im-file-service
+    ports:
+      - "8081:8081"
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=distim-files
+    depends_on:
+      - minio
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ Redis 7 ============
+  redis:
+    image: redis:7-alpine
+    container_name: im-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ PostgreSQL ============
+  postgres:
+    image: postgres:16-alpine
+    container_name: im-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: distim
+      POSTGRES_PASSWORD: distim_secret
+      POSTGRES_DB: distributed_im
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ MinIO 对象存储 ============
+  minio:
+    image: minio/minio:latest
+    container_name: im-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ Prometheus 监控 ============
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: im-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - im-network
+
+  # ============ Grafana 可视化 ============
+  grafana:
+    image: grafana/grafana:latest
+    container_name: im-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - im-network
+
+volumes:
+  redis-data:
+  postgres-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  im-network:
+    driver: bridge

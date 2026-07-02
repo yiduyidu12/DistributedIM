@@ -1,0 +1,57 @@
+# DistributedIM - C++ 网关服务多阶段 Dockerfile
+# 编译阶段使用完整的构建环境，运行阶段使用精简镜像
+
+# ============ 编译阶段 ============
+FROM ubuntu:22.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    cmake \
+    g++ \
+    make \
+    libhiredis-dev \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libsodium-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# 复制源代码
+COPY gateway/ CMakeLists.txt ./
+COPY gateway/include/ ./include/
+COPY gateway/src/ ./src/
+
+# 构建
+RUN mkdir -p build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc)
+
+# ============ 运行阶段 ============
+FROM ubuntu:22.04 AS runtime
+
+RUN apt-get update && apt-get install -y \
+    libhiredis0.14 \
+    libssl3 \
+    libcurl4 \
+    libsodium23 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 从编译阶段复制二进制文件
+COPY --from=builder /build/build/gateway_server /app/gateway_server
+COPY gateway/config.json /app/config.json
+
+# 健康检查
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD netstat -tln | grep 8888 || exit 1
+
+EXPOSE 8888
+
+# 优雅关闭处理
+STOPSIGNAL SIGTERM
+
+ENTRYPOINT ["/app/gateway_server"]
+CMD ["8888"]

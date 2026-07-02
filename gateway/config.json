@@ -13,5 +13,30 @@
     "log": {
         "level": "trace",
         "file": "gateway.log"
+    },
+    "websocket": {
+        "enabled": true,
+        "max_frame_size": 65536,
+        "max_message_size": 1048576
+    },
+    "e2ee": {
+        "enabled": false,
+        "key_dir": "./keys"
+    },
+    "ai": {
+        "enabled": false,
+        "api_url": "http://ai-service:8000",
+        "audit_api_url": "http://http-api:8080",
+        "timeout_ms": 30000,
+        "max_context_messages": 20
+    },
+    "region": {
+        "region": "default",
+        "prefer_local": true
+    },
+    "rate_limit": {
+        "enabled": true,
+        "messages_per_second": 10.0,
+        "bucket_capacity": 20
     }
 }

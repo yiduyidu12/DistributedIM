@@ -23,9 +23,10 @@ protected:
     // 测试后的清理操作
     void TearDown() override {
         // 确保测试用户已登出，避免影响其他测试
-        redis_.userLogout("testuser");
-        redis_.userLogout("user1");
-        redis_.userLogout("user2");
+        // 多设备登出需要提供 gateway_id 和 fd 参数
+        redis_.userLogout("testuser", 1, 100);
+        redis_.userLogout("user1", 1, 101);
+        redis_.userLogout("user2", 2, 102);
     }
 };
 
@@ -47,8 +48,8 @@ TEST_F(RedisClientTest, UserLogout) {
     // 先登录用户
     redis_.userLogin("testuser", 1, 100);
     
-    // 执行登出操作
-    bool result = redis_.userLogout("testuser");
+    // 执行登出操作（多设备登出需要提供 gateway_id 和 fd 参数）
+    bool result = redis_.userLogout("testuser", 1, 100);
     EXPECT_TRUE(result);  // 登出成功
     
     // 验证用户网关信息已被清理
@@ -80,6 +81,7 @@ TEST_F(RedisClientTest, GetOnlineUsers) {
     EXPECT_GE(users.size(), 2);  // 至少包含两个测试用户
     
     // 清理测试用户（也会在 TearDown 中执行，这里是为了显式说明）
-    redis_.userLogout("user1");
-    redis_.userLogout("user2");
+    // 多设备登出需要提供 gateway_id 和 fd 参数
+    redis_.userLogout("user1", 1, 101);
+    redis_.userLogout("user2", 2, 102);
 }
