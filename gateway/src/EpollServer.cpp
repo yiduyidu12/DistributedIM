@@ -178,16 +178,34 @@ void EpollServer::registerHandlers() {
     std::string sendMsg = sendJson.dump() + "\n";
 
     // 广播给所有在线用户（用sendToUser支持多设备）
+    // 群聊广播消息使用BULK优先级，避免高负载时阻塞关键消息
     auto users = redis_.getAllOnlineUsers();
     Logger::debug("[Chat] Broadcasting to {} online users", users.size());
 
     for (auto &[name, gateway] : users) {
       if (name == username) continue;
 
+      // ============ E2EE 加密（群聊广播） ============
+      // 对每个在线用户单独加密（如果已建立会话）
+      std::string msg_to_send = sendMsg;
+#ifdef E2E_ENABLED
+      SessionState* session = E2EEManager::instance().getSession(name);
+      if (session) {
+        std::vector<uint8_t> ciphertext;
+        if (E2EEManager::instance().encryptMessage(*session, sendMsg, ciphertext)) {
+          nlohmann::json e2eeJson{{"type", "e2ee"},
+                                  {"from", username},
+                                  {"to", name},
+                                  {"data", std::string(ciphertext.begin(), ciphertext.end())}};
+          msg_to_send = e2eeJson.dump() + "\n";
+        }
+      }
+#endif
+
       if (gateway == gateway_id_) {
-        sendToUser(name, sendMsg);
+        sendToUser(name, msg_to_send, MessagePriority::BULK);
       } else {
-        redis_.pushMessage(name, sendMsg);
+        redis_.pushMessage(name, msg_to_send);
       }
     }
     Logger::info("[Chat] Broadcast completed from user='{}'", username);
@@ -236,9 +254,27 @@ void EpollServer::registerHandlers() {
     if (!reply_to.empty()) sendJson["reply_to"] = reply_to;
     std::string sendMsg = sendJson.dump() + "\n";
 
+    // ============ E2EE 加密（发送端） ============
+    // 如果与目标用户已建立E2EE会话，则加密消息
+#ifdef E2E_ENABLED
+    SessionState* e2ee_session = E2EEManager::instance().getSession(target);
+    if (e2ee_session) {
+      std::vector<uint8_t> ciphertext;
+      if (E2EEManager::instance().encryptMessage(*e2ee_session, sendMsg, ciphertext)) {
+        nlohmann::json e2eeJson{{"type", "e2ee"},
+                                {"from", username},
+                                {"to", target},
+                                {"data", std::string(ciphertext.begin(), ciphertext.end())}};
+        sendMsg = e2eeJson.dump() + "\n";
+        Logger::trace("[E2EE] Message encrypted for user '{}'", target);
+      }
+    }
+#endif
+
     // 判断目标用户是否在本地网关
+    // 私聊消息使用NORMAL优先级
     if (target_gateway == gateway_id_) {
-      sendToUser(target, sendMsg);
+      sendToUser(target, sendMsg, MessagePriority::NORMAL);
 
       // 如果消息有 msg_id，注册ACK追踪
       if (!msg_id.empty()) {
@@ -359,9 +395,25 @@ void EpollServer::registerHandlers() {
     std::string sendMsg = sendJson.dump() + "\n";
 
     auto members = group_mgr_.getMembers(group_id);
+    // 群组消息使用BULK优先级
     for (const auto& member : members) {
       if (member != username) {
-        sendToUser(member, sendMsg);
+        // ============ E2EE 加密（群组消息） ============
+        std::string msg_to_send = sendMsg;
+#ifdef E2E_ENABLED
+        SessionState* session = E2EEManager::instance().getSession(member);
+        if (session) {
+          std::vector<uint8_t> ciphertext;
+          if (E2EEManager::instance().encryptMessage(*session, sendMsg, ciphertext)) {
+            nlohmann::json e2eeJson{{"type", "e2ee"},
+                                    {"from", username},
+                                    {"to", member},
+                                    {"data", std::string(ciphertext.begin(), ciphertext.end())}};
+            msg_to_send = e2eeJson.dump() + "\n";
+          }
+        }
+#endif
+        sendToUser(member, msg_to_send, MessagePriority::BULK);
       }
     }
     Logger::info("[Group] 群消息已发送: group={}, from={}", group_id, username);
@@ -387,7 +439,8 @@ void EpollServer::registerHandlers() {
     std::string reactionMsg = reaction.dump() + "\n";
 
     if (!target_user.empty()) {
-      sendToUser(target_user, reactionMsg);
+      // 消息反应使用NORMAL优先级
+      sendToUser(target_user, reactionMsg, MessagePriority::NORMAL);
     }
     return std::string();
   });
@@ -424,9 +477,10 @@ void EpollServer::registerHandlers() {
     std::string response_json = getJsonString(msg, "key_data");
     if (response_json.empty()) {
       // 请求对方公钥，生成密钥分发请求
+      // 密钥交换使用URGENT优先级，确保安全操作优先完成
       std::string target_user = getJsonString(msg, "to");
       std::string request = E2EEManager::instance().createKeyRequest(username);
-      sendToUser(target_user, request);
+      sendToUser(target_user, request, MessagePriority::URGENT);
       return std::string();
     }
     // 处理密钥响应并建立端到端加密会话
@@ -439,6 +493,110 @@ void EpollServer::registerHandlers() {
     Logger::warn("[E2EE] 密钥交换失败: {} <-> {}", username, from_user);
     nlohmann::json err{{"type", "error"}, {"msg", "key exchange failed"}};
     return err.dump() + "\n";
+  });
+#endif
+
+  // ============ AI 服务处理器 ============
+#ifdef AI_SERVICE_ENABLED
+  // AI 聊天请求处理器
+  handler_.registerHandler("ai_chat", [this](const std::string &msg,
+                                             const std::string &username) {
+    if (username.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "please login first"}};
+      return err.dump() + "\n";
+    }
+    std::string prompt = getJsonString(msg, "prompt");
+    std::string context = getJsonString(msg, "context");
+
+    if (prompt.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "prompt is required"}};
+      return err.dump() + "\n";
+    }
+
+    Logger::info("[AI Chat] User '{}' requested AI chat with prompt: {}",
+                 username, prompt.substr(0, 50) + "...");
+
+    ai_client_.chat(prompt, context,
+      [this, username](bool success, const std::string& response) {
+        nlohmann::json reply{{"type", "ai_response"}, {"success", success}};
+        if (success) {
+          reply["content"] = response;
+          Logger::info("[AI Chat] Response received for user '{}'", username);
+        } else {
+          reply["error"] = response;
+          Logger::warn("[AI Chat] Failed for user '{}': {}", username, response);
+        }
+        sendToUser(username, reply.dump() + "\n", MessagePriority::URGENT);
+      });
+
+    nlohmann::json ack{{"type", "ai_request"}, {"status", "processing"}};
+    return ack.dump() + "\n";
+  });
+
+  // AI 摘要请求处理器
+  handler_.registerHandler("ai_summary", [this](const std::string &msg,
+                                                const std::string &username) {
+    if (username.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "please login first"}};
+      return err.dump() + "\n";
+    }
+    std::string messages = getJsonString(msg, "messages");
+
+    if (messages.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "messages is required"}};
+      return err.dump() + "\n";
+    }
+
+    Logger::info("[AI Summary] User '{}' requested message summary", username);
+
+    ai_client_.summarize(messages,
+      [this, username](bool success, const std::string& response) {
+        nlohmann::json reply{{"type", "ai_summary"}, {"success", success}};
+        if (success) {
+          reply["summary"] = response;
+          Logger::info("[AI Summary] Response received for user '{}'", username);
+        } else {
+          reply["error"] = response;
+          Logger::warn("[AI Summary] Failed for user '{}': {}", username, response);
+        }
+        sendToUser(username, reply.dump() + "\n", MessagePriority::URGENT);
+      });
+
+    nlohmann::json ack{{"type", "ai_request"}, {"status", "processing"}};
+    return ack.dump() + "\n";
+  });
+
+  // AI 情感分析请求处理器
+  handler_.registerHandler("ai_analyze", [this](const std::string &msg,
+                                                const std::string &username) {
+    if (username.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "please login first"}};
+      return err.dump() + "\n";
+    }
+    std::string text = getJsonString(msg, "text");
+
+    if (text.empty()) {
+      nlohmann::json err{{"type", "error"}, {"msg", "text is required"}};
+      return err.dump() + "\n";
+    }
+
+    Logger::info("[AI Analyze] User '{}' requested sentiment analysis", username);
+
+    ai_client_.analyzeSentiment(text,
+      [this, username](bool success, const std::string& response) {
+        nlohmann::json reply{{"type", "ai_analyze"}, {"success", success}};
+        if (success) {
+          reply["sentiment"] = nlohmann::json::parse(response);
+          Logger::info("[AI Analyze] Response received for user '{}'", username);
+        } else {
+          reply["error"] = response;
+          Logger::warn("[AI Analyze] Failed for user '{}': {}", username, response);
+        }
+        sendToUser(username, reply.dump() + "\n", MessagePriority::URGENT);
+      });
+
+    nlohmann::json ack{{"type", "ai_request"}, {"status", "processing"}};
+    return ack.dump() + "\n";
   });
 #endif
 
@@ -964,8 +1122,31 @@ void EpollServer::handleMessage(int client_fd, Connection &conn,
     return;
   }
 
-  // 检查消息是否应通过优先队列调度
-  // 限流检查
+  // ============ E2EE 解密（接收端） ============
+  // 如果消息是加密的（type == "e2ee"），先解密再处理
+#ifdef E2E_ENABLED
+  if (getJsonType(msg) == "e2ee") {
+    std::string encrypted_data = getJsonString(msg, "data");
+    std::string from_user = getJsonString(msg, "from");
+    if (!encrypted_data.empty() && !from_user.empty()) {
+      SessionState* session = E2EEManager::instance().getSession(from_user);
+      if (session) {
+        std::vector<uint8_t> ciphertext(encrypted_data.begin(), encrypted_data.end());
+        std::string plaintext;
+        if (E2EEManager::instance().decryptMessage(*session, ciphertext, plaintext)) {
+          msg = plaintext;
+          Logger::trace("[E2EE] Message decrypted from user '{}'", from_user);
+        } else {
+          Logger::warn("[E2EE] Failed to decrypt message from user '{}'", from_user);
+          return;
+        }
+      } else {
+        Logger::warn("[E2EE] No session found for user '{}', dropping encrypted message", from_user);
+        return;
+      }
+    }
+  }
+#endif
 
   std::string type = getJsonType(msg);
   // 记录消息指标（按类型分类）
@@ -1202,14 +1383,17 @@ void EpollServer::sendToClient(int fd, const std::string &msg) {
 }
 
 // 向用户的所有设备发送消息（多设备广播）
+// 通过优先级队列发送，确保消息按优先级顺序投递
 // 参数 username: 目标用户名
 // 参数 msg: 消息内容
-void EpollServer::sendToUser(const std::string& username, const std::string& msg) {
+// 参数 priority: 消息优先级（默认NORMAL）
+void EpollServer::sendToUser(const std::string& username, const std::string& msg,
+                             MessagePriority priority) {
   auto it = user_map_.find(username);
   if (it == user_map_.end()) return;
 
   for (int fd : it->second) {
-    sendToClient(fd, msg);
+    priority_q_.push(msg, fd, priority);
   }
 }
 

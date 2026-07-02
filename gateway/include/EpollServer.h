@@ -91,7 +91,12 @@ private:
     void sendToClient(int fd, const std::string &msg);
 
     // 向用户的所有设备发送消息（多设备广播）
-    void sendToUser(const std::string& username, const std::string& msg);
+    // 通过优先级队列发送，确保消息按优先级顺序投递
+    // 参数 username: 目标用户名
+    // 参数 msg: 消息内容
+    // 参数 priority: 消息优先级（默认NORMAL）
+    void sendToUser(const std::string& username, const std::string& msg,
+                    MessagePriority priority = MessagePriority::NORMAL);
 
     // 广播消息给所有客户端
     void broadcast(const std::string &msg, int exclude_fd = -1);
