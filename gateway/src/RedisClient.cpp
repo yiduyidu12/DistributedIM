@@ -305,6 +305,7 @@ int RedisClient::getUserFd(const std::string &username) {
 
 // 获取所有在线用户
 // 使用管道技术批量获取用户的网关信息，减少网络往返次数
+// 用户数据结构：user:username (Set) → {"gw_1:fd_1", "gw_2:fd_2", ...}
 // 返回值: 用户名到网关ID的映射
 std::unordered_map<std::string, int> RedisClient::getAllOnlineUsers() {
   std::unordered_map<std::string, int> users;
@@ -323,12 +324,12 @@ std::unordered_map<std::string, int> RedisClient::getAllOnlineUsers() {
     return users;
   }
 
-  // 使用管道批量追加HGET命令
+  // 使用管道批量追加SRANDMEMBER命令获取用户设备信息
   for (size_t i = 0; i < r->elements; ++i) {
     if (r->element[i]->type == REDIS_REPLY_STRING && r->element[i]->str) {
       std::string key = userKey(r->element[i]->str);
-      if (redisAppendCommand(ctx_, "HGET %s gateway", key.c_str()) != REDIS_OK) {
-        Logger::error("RedisClient: Failed to append HGET command for user {}", r->element[i]->str);
+      if (redisAppendCommand(ctx_, "SRANDMEMBER %s", key.c_str()) != REDIS_OK) {
+        Logger::error("RedisClient: Failed to append SRANDMEMBER command for user {}", r->element[i]->str);
       } else {
         users[r->element[i]->str] = -1;
       }
@@ -336,7 +337,7 @@ std::unordered_map<std::string, int> RedisClient::getAllOnlineUsers() {
   }
   freeReplyObject(r);
 
-  // 批量获取回复
+  // 批量获取回复并解析设备信息（格式: gw_id:fd）
   for (auto &[name, gw] : users) {
     redisReply *hr = nullptr;
     if (redisGetReply(ctx_, reinterpret_cast<void **>(&hr)) != REDIS_OK) {
@@ -344,15 +345,20 @@ std::unordered_map<std::string, int> RedisClient::getAllOnlineUsers() {
       continue;
     }
     if (hr && hr->type == REDIS_REPLY_STRING) {
-      try {
-        gw = std::stoi(hr->str);
-      } catch (const std::invalid_argument &) {
-        Logger::warn("RedisClient: Invalid gateway format for user {}", name);
-      } catch (const std::out_of_range &) {
-        Logger::warn("RedisClient: Gateway value out of range for user {}", name);
+      std::string device_info(hr->str);
+      size_t colon_pos = device_info.find(':');
+      if (colon_pos != std::string::npos) {
+        std::string gateway_str = device_info.substr(0, colon_pos);
+        try {
+          gw = std::stoi(gateway_str);
+        } catch (const std::invalid_argument &) {
+          Logger::warn("RedisClient: Invalid gateway format for user {}: {}", name, gateway_str);
+        } catch (const std::out_of_range &) {
+          Logger::warn("RedisClient: Gateway value out of range for user {}: {}", name, gateway_str);
+        }
       }
     } else if (hr && hr->type == REDIS_REPLY_ERROR) {
-      Logger::error("RedisClient: HGET error for user {}: {}", name, hr->str);
+      Logger::error("RedisClient: SRANDMEMBER error for user {}: {}", name, hr->str);
     }
     if (hr)
       freeReplyObject(hr);
@@ -475,12 +481,7 @@ std::vector<std::string> RedisClient::drainPendingUsers() {
 
   freeReplyObject(r);
   return users;
-}// RedisClient - Redis客户端封装类新增方法
-// 包含群组管理所需的 Hash/Set 操作方法
-
-#include "RedisClient.h"
-#include "Logger.h"
-#include <vector>
+}
 
 // ============ Hash 操作（群组元数据） ============
 
