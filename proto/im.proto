@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package distributedim;
+
+option go_package = "./proto";
+option java_package = "com.distributedim.proto";
+option java_outer_classname = "IMProto";
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+  string device_id = 3;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string message = 2;
+  int32 gateway_id = 3;
+}
+
+message LogoutRequest {
+  string username = 1;
+  int32 gateway_id = 2;
+  int32 fd = 3;
+}
+
+message LogoutResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ChatMessage {
+  string msg_id = 1;
+  string from = 2;
+  string to = 3;
+  string content = 4;
+  int64 timestamp = 5;
+  string reply_to = 6;
+}
+
+message GroupMessage {
+  string msg_id = 1;
+  string group_id = 2;
+  string from = 3;
+  string content = 4;
+  int64 timestamp = 5;
+}
+
+message GroupCreateRequest {
+  string group_id = 1;
+  string group_name = 2;
+  string creator = 3;
+  repeated string members = 4;
+}
+
+message GroupCreateResponse {
+  bool success = 1;
+  string message = 2;
+  string group_id = 3;
+}
+
+message GroupJoinRequest {
+  string group_id = 1;
+  string username = 2;
+}
+
+message GroupJoinResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GroupLeaveRequest {
+  string group_id = 1;
+  string username = 2;
+}
+
+message GroupLeaveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GroupListRequest {
+  string username = 1;
+}
+
+message GroupListResponse {
+  repeated GroupInfo groups = 1;
+}
+
+message GroupInfo {
+  string group_id = 1;
+  string group_name = 2;
+  string creator = 3;
+  int32 member_count = 4;
+  repeated string members = 5;
+}
+
+message OnlineUsersRequest {}
+
+message OnlineUsersResponse {
+  repeated string users = 1;
+  int32 count = 2;
+}
+
+message PingRequest {
+  int64 timestamp = 1;
+}
+
+message PongResponse {
+  int64 timestamp = 1;
+}
+
+message ACKRequest {
+  string msg_id = 1;
+  string from = 2;
+  int64 timestamp = 3;
+}
+
+message E2EEKeyExchange {
+  string from = 1;
+  string to = 2;
+  bytes public_key = 3;
+  string key_type = 4;
+}
+
+message AIMessageRequest {
+  string type = 1;
+  string prompt = 2;
+  string context = 3;
+  repeated string messages = 4;
+}
+
+message AIMessageResponse {
+  bool success = 1;
+  string content = 2;
+  string error = 3;
+}
+
+message MessageReaction {
+  string msg_id = 1;
+  string from = 2;
+  string reaction = 3;
+}
+
+message GatewayInfo {
+  string gateway_id = 1;
+  string host = 2;
+  int32 port = 3;
+  string region = 4;
+  int32 load = 5;
+}
+
+message GatewayListRequest {}
+
+message GatewayListResponse {
+  repeated GatewayInfo gateways = 1;
+}
+
+service IMService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc SendMessage(ChatMessage) returns (ACKRequest);
+  rpc SendGroupMessage(GroupMessage) returns (ACKRequest);
+  rpc CreateGroup(GroupCreateRequest) returns (GroupCreateResponse);
+  rpc JoinGroup(GroupJoinRequest) returns (GroupJoinResponse);
+  rpc LeaveGroup(GroupLeaveRequest) returns (GroupLeaveResponse);
+  rpc GetGroupList(GroupListRequest) returns (GroupListResponse);
+  rpc GetOnlineUsers(OnlineUsersRequest) returns (OnlineUsersResponse);
+  rpc Ping(PingRequest) returns (PongResponse);
+  rpc GetGatewayList(GatewayListRequest) returns (GatewayListResponse);
+}
